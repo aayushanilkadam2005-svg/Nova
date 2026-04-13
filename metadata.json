@@ -1,0 +1,5 @@
+{
+  "name": "Nova Live",
+  "description": "Real-time voice and text AI assistant with a sassy personality.",
+  "requestFramePermissions": ["microphone"]
+}
