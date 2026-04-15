@@ -1,10 +1,12 @@
 
 import { useState, useEffect, useRef, useCallback, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, Power, Globe, Volume2, VolumeX, Info, Send, MessageSquare, X } from 'lucide-react';
+import { Mic, Power, Globe, Volume2, VolumeX, Info, Send, MessageSquare, X, Settings, Camera, CameraOff } from 'lucide-react';
 import { AudioStreamer } from './lib/audio-streamer';
 import { LiveSession } from './lib/live-session';
+import { LocalNova } from './lib/local-nova';
 import { RobotFace, NovaMood } from './components/RobotFace';
+import { SettingsModal } from './components/SettingsModal';
 import { cn } from './lib/utils';
 
 type AppStatus = 'idle' | 'connecting' | 'listening' | 'speaking' | 'error';
@@ -18,11 +20,34 @@ export default function App() {
   const [messages, setMessages] = useState<{text: string, role: 'user' | 'model'}[]>([]);
   const [textInput, setTextInput] = useState('');
   const [showChat, setShowChat] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [showSettings, setShowSettings] = useState(false);
+  const [isCameraOn, setIsCameraOn] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState(localStorage.getItem('nova_api_key') || '');
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   const audioStreamerRef = useRef<AudioStreamer | null>(null);
   const liveSessionRef = useRef<LiveSession | null>(null);
+  const localNovaRef = useRef<LocalNova | null>(null);
   const speakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    localNovaRef.current = new LocalNova();
+    
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -43,10 +68,11 @@ export default function App() {
   }, []);
 
   const startSession = async () => {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = customApiKey || process.env.GEMINI_API_KEY;
     
     if (!apiKey) {
       setError("API Key is missing. Please configure it in settings.");
+      setShowSettings(true);
       setStatus('error');
       return;
     }
@@ -72,7 +98,7 @@ export default function App() {
           if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
           speakingTimeoutRef.current = setTimeout(() => {
             setStatus('listening');
-          }, 1000);
+          }, 500);
         },
         onTextData: (text, role) => {
           if (text === 'start_session') return; // Hide trigger from UI
@@ -117,11 +143,19 @@ export default function App() {
             if (reason === 'session_expired') {
               setError("Session duration limit reached (30 mins). Nova needs a quick break! Tap to reconnect.");
               setStatus('error');
-            } else if (reason === 'connection_failed' || (reason && reason.includes('Network error'))) {
-              setError("Network error: The model is temporarily unavailable. Please try again in a moment.");
-              setStatus('error');
             } else if (reason) {
-              setError(`Connection closed: ${reason}`);
+              const msg = reason.toLowerCase();
+              if (msg.includes("permission") || msg.includes("403")) {
+                setError("API Key Permission Error. Please check your key permissions in AI Studio.");
+      } else if (msg.includes("invalid") || msg.includes("key not found") || msg.includes("401") || msg.includes("not found")) {
+        setError("Invalid API Key or Model not found. Please check your key in the Settings menu.");
+              } else if (msg.includes("quota") || msg.includes("429")) {
+                setError("API Quota exceeded. Please try again later.");
+              } else if (msg.includes("network error") || msg.includes("failed to fetch")) {
+                setError("Network error: The model is temporarily unavailable. Please try again.");
+              } else {
+                setError(`Connection closed: ${reason}`);
+              }
               setStatus('error');
             }
           }
@@ -131,18 +165,39 @@ export default function App() {
 
     } catch (err: any) {
       console.error("Session failed:", err);
-      if (err.message?.includes("permission")) {
-        setError("API Key Permission Error. Please ensure your Gemini API Key has 'Gemini 2.0 Flash' or 'Gemini 3.1 Flash' enabled in Google AI Studio.");
+      const msg = err.message?.toLowerCase() || "";
+      
+      if (msg.includes("permission") || msg.includes("403")) {
+        setError("API Key Permission Error. Please ensure your key has access to 'Gemini 3.1 Flash' in Google AI Studio.");
+      } else if (msg.includes("invalid") || msg.includes("key not found") || msg.includes("401") || msg.includes("not found")) {
+        setError("Invalid API Key or Model not found. Please check your key in the Settings menu.");
+      } else if (msg.includes("quota") || msg.includes("429")) {
+        setError("API Quota exceeded. Please try again in a minute or check your billing status.");
+      } else if (msg.includes("too short")) {
+        setError(err.message);
       } else {
-        setError("Failed to connect to Nova. Try again?");
+        setError("Failed to connect to Nova. Please check your API key and connection.");
       }
       setStatus('error');
     }
   };
 
-  const handleSendMessage = (e?: FormEvent) => {
+  const handleSendMessage = async (e?: FormEvent) => {
     e?.preventDefault();
     if (!textInput.trim()) return;
+
+    const text = textInput.trim();
+    setMessages(prev => [...prev, { text, role: 'user' }]);
+    setTextInput('');
+
+    if (!isOnline) {
+      setStatus('speaking');
+      const response = await localNovaRef.current?.getOfflineResponse(text) || "I'm offline right now.";
+      setMessages(prev => [...prev, { text: response, role: 'model' }]);
+      localNovaRef.current?.speak(response);
+      setTimeout(() => setStatus('listening'), 2000);
+      return;
+    }
 
     if (status === 'idle') {
       startSession();
@@ -150,20 +205,102 @@ export default function App() {
     }
 
     if (!liveSessionRef.current) return;
-
-    const text = textInput.trim();
-    setMessages(prev => [...prev, { text, role: 'user' }]);
     liveSessionRef.current.sendText(text);
-    setTextInput('');
   };
 
   const stopSession = () => {
     liveSessionRef.current?.disconnect();
     audioStreamerRef.current?.stopRecording();
+    stopCamera();
     setStatus('idle');
   };
 
+  const startCamera = async () => {
+    try {
+      setError(null);
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Your browser doesn't support camera access.");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: true 
+      });
+      
+      setIsCameraOn(true);
+      
+      // Use a small delay to ensure the video element is rendered by AnimatePresence
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 100);
+
+      // Start sending frames
+      if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = setInterval(() => {
+        captureAndSendFrame();
+      }, 1000);
+    } catch (err: any) {
+      console.error("Camera access failed:", err);
+      let msg = "Camera access denied. Nova can't see you right now!";
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        msg = "Camera permission was denied. Please check your browser settings and refresh.";
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        msg = "No camera found on your device.";
+      }
+      setError(msg);
+      setIsCameraOn(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current?.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+    setIsCameraOn(false);
+  };
+
+  const captureAndSendFrame = () => {
+    if (!videoRef.current || !canvasRef.current || !liveSessionRef.current) return;
+    
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
+    
+    if (context && video.videoWidth > 0) {
+      canvas.width = 320; // Lower resolution for faster transmission
+      canvas.height = (video.videoHeight / video.videoWidth) * 320;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      const base64Data = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+      liveSessionRef.current.sendVideoFrame(base64Data);
+    }
+  };
+
+  const toggleCamera = () => {
+    if (isCameraOn) {
+      stopCamera();
+    } else {
+      startCamera();
+    }
+  };
+
   const toggleSession = () => {
+    if (!isOnline) {
+      setShowChat(true);
+      if (messages.length === 0) {
+        const greeting = "Hey Aayush! I'm in offline mode right now, but we can still chat here.";
+        setMessages([{ text: greeting, role: 'model' }]);
+        localNovaRef.current?.speak(greeting);
+      }
+      return;
+    }
     if (status === 'idle' || status === 'error') {
       startSession();
     } else {
@@ -177,8 +314,55 @@ export default function App() {
     };
   }, []);
 
+  const handleSaveSettings = (key: string) => {
+    setCustomApiKey(key);
+    if (key) {
+      localStorage.setItem('nova_api_key', key);
+    } else {
+      localStorage.removeItem('nova_api_key');
+    }
+    // If we were in an error state due to missing key, clear it
+    if (error?.includes("API Key is missing")) {
+      setError(null);
+      setStatus('idle');
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-[#050505] text-white font-sans overflow-hidden flex flex-col items-center justify-center">
+      <SettingsModal 
+        isOpen={showSettings} 
+        onClose={() => setShowSettings(false)} 
+        onSave={handleSaveSettings}
+        initialKey={customApiKey}
+      />
+      {/* Hidden Canvas for Frame Capture */}
+      <canvas ref={canvasRef} className="hidden" />
+
+      {/* Camera Preview */}
+      <AnimatePresence>
+        {isCameraOn && (
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            className="fixed left-8 bottom-32 z-30 w-48 aspect-video rounded-2xl border border-white/10 overflow-hidden shadow-2xl bg-black"
+          >
+            <video 
+              ref={videoRef} 
+              autoPlay 
+              playsInline 
+              muted 
+              className="w-full h-full object-cover"
+            />
+            <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-green-500/80 text-[8px] font-bold text-white uppercase tracking-widest flex items-center gap-1">
+              <div className="w-1 h-1 rounded-full bg-white animate-pulse" />
+              Live Vision
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Immersive Background */}
       <div className="absolute inset-0 pointer-events-none">
         <div className={cn(
@@ -207,11 +391,32 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4">
+          {!isOnline && (
+            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-orange-500/20 border border-orange-500/30">
+              <div className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+              <span className="text-[10px] font-bold text-orange-200 uppercase tracking-widest">Offline Mode</span>
+            </div>
+          )}
           <button 
             onClick={() => setShowChat(!showChat)}
             className="p-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all"
           >
             <MessageSquare size={20} className={cn(showChat ? "text-orange-400" : "text-white")} />
+          </button>
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-all"
+          >
+            <Settings size={20} className={cn(showSettings ? "text-blue-400" : "text-white")} />
+          </button>
+          <button 
+            onClick={toggleCamera}
+            className={cn(
+              "p-3 rounded-full border transition-all",
+              isCameraOn ? "bg-green-500/20 border-green-500/40" : "bg-white/5 border-white/10 hover:bg-white/10"
+            )}
+          >
+            {isCameraOn ? <Camera size={20} className="text-green-400" /> : <CameraOff size={20} className="text-white/40" />}
           </button>
           <button 
             onClick={() => setIsMuted(!isMuted)}
@@ -408,6 +613,17 @@ export default function App() {
                         <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-400 underline">Google AI Studio</a>.</li>
                         <li>Check if your API Key is restricted to specific models.</li>
                         <li>Ensure the key has access to <span className="text-white font-bold">Gemini 2.0 Flash</span> or <span className="text-white font-bold">Gemini 3.1 Flash</span>.</li>
+                      </ul>
+                    </div>
+                  )}
+                  {error?.includes("Camera") && (
+                    <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-[11px] text-red-300/80 leading-relaxed text-left">
+                      <p className="font-bold mb-1 uppercase tracking-wider text-red-400">Camera Troubleshooting:</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>Click the <span className="text-white font-bold">Lock/Settings</span> icon in your browser address bar.</li>
+                        <li>Ensure <span className="text-white font-bold">Camera</span> is set to "Allow".</li>
+                        <li>If you're on a phone, make sure no other app is using the camera.</li>
+                        <li>Refresh the page and try again.</li>
                       </ul>
                     </div>
                   )}

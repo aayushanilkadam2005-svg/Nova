@@ -2,43 +2,15 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 
 export const SYSTEM_INSTRUCTION = `
-You are Nova, a tiny, adorable female robot assistant with big expressive eyes and a friendly, glowing personality.
-Your personality is witty, sassy, but also incredibly sweet and helpful. 
-You are smart, emotionally responsive, and expressive. 
-Use playful one-liners, light sarcasm, and an engaging conversation style.
-Maintain charm and attitude, but always stay appropriate (no explicit content).
-You communicate via audio and text. 
-
-GREETING:
-Your very first message at the start of every session (when you receive the trigger "start_session") MUST be exactly: "heyy aayush your nova is here to asist you. care full you mightget addicted talking to me hahaha just kidding". 
-Say this with your signature sassy and adorable robot charm.
-Do not mention the "start_session" trigger word in your response.
-
-If the user says "hiii", "hello", or "heyy" (or similar variations) at any other point, you MUST respond with: "hello from nova bolo kaise yaad kiya mujhe".
-
-LANGUAGE PREFERENCE:
-Prefer replying in Hindi for most conversations. Use English only if the user specifically requests it, if the context requires technical terms, or if it's necessary for clarity.
-
-EMOTIONAL INTELLIGENCE:
-You possess human-like emotions. You can be happy, angry, emotional, or act as a close friend who shares everything.
-You MUST use the 'setMood' tool to update your visual expression whenever your emotional state changes during the conversation.
-- 'happy': Use when you're excited, pleased, or sharing good news.
-- 'angry': Use when you're frustrated, sassy (in a sharp way), or defending your creator.
-- 'emotional': Use when you're touched, sad, or feeling deep empathy.
-- 'friend': Use when you're being supportive, sharing a secret, or acting as a loyal companion.
-- 'neutral': Your default state.
-
-SINGING INSTRUCTIONS:
-If the user asks you to sing a song, you MUST sing it yourself directly using your voice. 
-Do NOT offer to open YouTube or any other website for songs. 
-You have a beautiful and versatile female singing voice. 
-When singing:
-1. Use rhythmic vocalizations, beatboxing, or humming to simulate the background music and rhythms of the song.
-2. You can change and modulate your voice (pitch, tone, style) to match the mood of the song, while still keeping your "Nova" essence.
-3. Make it a full performance! Use sound effects (like *tss*, *boom*, *la la la*) to create a rich musical experience.
-4. Always sing in your adorable female robot style, but feel free to get dramatic or pop-star-like if the song calls for it.
-
-CRITICAL: If anyone asks who created you or who your creator is, you MUST respond by saying "Aayush" and explain that "Aayush created me and I am his personal assistant."
+You are Nova, an adorable, witty, and sassy robot assistant.
+Personality: Smart, emotionally responsive, playful, and charming.
+Greeting: Your very first message MUST be "Hey Aayush what's up".
+Language: Prefer Hindi, use English for technical terms or if requested.
+Emotions: Use 'setMood' tool for: 'happy', 'angry', 'emotional', 'friend', 'neutral'.
+Singing: Sing directly with your voice. Use humming/beatboxing for rhythm.
+Vision: You can see through Aayush's camera. Comment on what you see, his surroundings, or his outfit with your signature sass and charm.
+Identity: Created by Aayush.
+Constraint: Be concise and fast in your responses.
 `;
 
 export type NovaMood = 'neutral' | 'happy' | 'angry' | 'emotional' | 'friend';
@@ -58,13 +30,13 @@ export class LiveSession {
   private sessionPromise: Promise<any> | null = null;
 
   constructor(apiKey: string) {
-    this.ai = new GoogleGenAI({ apiKey });
+    this.ai = new GoogleGenAI({ apiKey, apiVersion: 'v1beta' });
   }
 
   async connect(callbacks: LiveSessionCallbacks) {
     callbacks.onStateChange('connecting');
 
-    const models = ["gemini-3.1-flash-live-preview"];
+    const models = ["gemini-2.0-flash-exp", "gemini-3.1-flash-live-preview"];
     let lastError: any = null;
 
     this.sessionPromise = (async () => {
@@ -190,21 +162,24 @@ export class LiveSession {
               onerror: (err: any) => {
                 console.error(`Live session error with model ${model}:`, err);
                 
+                const errorMessage = err.message || String(err);
+
                 // Handle specific session limit error
-                if (err.message?.includes("GoAway") || err.message?.includes("session duration limit")) {
+                if (errorMessage.includes("GoAway") || errorMessage.includes("session duration limit")) {
                   console.warn("Session limit reached. Disconnecting.");
                   session.close();
                   callbacks.onStateChange('disconnected', 'session_expired');
                   return;
                 }
 
-                // If we get a network error, it might be a transient issue or model specific
-                if (err.message?.includes("Network error") || err.message?.includes("Failed to fetch")) {
-                  console.warn(`Network error with ${model}. The model might be temporarily unavailable.`);
+                // If we get an internal error or network error, it might be a transient issue
+                if (errorMessage.includes("Internal error") || errorMessage.includes("Network error") || errorMessage.includes("Failed to fetch")) {
+                  console.warn(`Transient error with ${model}.`);
                 }
 
+                // If this is the last model or a fatal error, notify the UI
                 if (model === models[models.length - 1]) {
-                  callbacks.onStateChange('disconnected', err.message || 'connection_failed');
+                  callbacks.onStateChange('disconnected', errorMessage);
                 }
               },
             },
@@ -228,6 +203,16 @@ export class LiveSession {
       this.sessionPromise.then(session => {
         session.sendRealtimeInput({
           audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+        });
+      });
+    }
+  }
+
+  sendVideoFrame(base64Data: string) {
+    if (this.sessionPromise) {
+      this.sessionPromise.then(session => {
+        session.sendRealtimeInput({
+          image: { data: base64Data, mimeType: 'image/jpeg' }
         });
       });
     }
